@@ -1,0 +1,1 @@
+# static-spell-generator.github.io
