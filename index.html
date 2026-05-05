@@ -564,12 +564,15 @@
         <button class="modal-close" id="import-close" type="button" aria-label="Close">&times;</button>
       </div>
       <div class="modal-body">
-        <p>Paste the URL of a D&amp;D Beyond character (or just the numeric character ID). I'll pull every Cantrip and 1st-level spell the character knows.</p>
-        <label for="import-url">Character URL or ID</label>
-        <input id="import-url" type="text" placeholder="https://www.dndbeyond.com/characters/165242129" autocomplete="off">
+        <p>Paste the shareable URL of a D&amp;D Beyond character. I'll pull every Cantrip and 1st-level spell the character knows.</p>
+        <label for="import-url">Shareable character URL</label>
+        <input id="import-url" type="text" placeholder="https://www.dndbeyond.com/characters/165242129/nF349d" autocomplete="off">
         <div class="warning">
-          <strong>The character sheet must be set to Public on D&amp;D Beyond.</strong>
-          On the character page, open the gear icon &rarr; Privacy and switch the visibility to <em>Public</em>. Otherwise this importer can't read it.
+          <strong>Two things have to be set on D&amp;D Beyond:</strong>
+          <ol style="margin:6px 0 0 20px;padding:0;">
+            <li>Set the character's privacy to <em>Public</em> (gear icon &rarr; Privacy on the character page).</li>
+            <li>Click the <em>Share</em> button on the character page to generate a shareable link, then paste that full URL above (it ends in a short code like <code>/nF349d</code>).</li>
+          </ol>
         </div>
         <p style="font-size:12px;color:var(--muted);margin-top:10px;">Importing replaces your current selection.</p>
         <div class="status" id="import-status" role="status" aria-live="polite"></div>
@@ -740,14 +743,14 @@ function setImportStatus(msg, kind) {
   el.innerHTML = msg || "";
 }
 
+// Returns { id, shareToken } or null. The share token is the short code that
+// appears after the ID in a "Share" link (e.g. /165242129/nF349d).
 function parseCharacterId(input) {
   const s = String(input || "").trim();
   if (!s) return null;
-  // Pure numeric ID
-  if (/^\d+$/.test(s)) return s;
-  // Try to extract /characters/<id> from a URL
-  const m = s.match(/dndbeyond\.com\/characters\/(\d+)/i);
-  if (m) return m[1];
+  if (/^\d+$/.test(s)) return { id: s, shareToken: null };
+  const m = s.match(/dndbeyond\.com\/characters\/(\d+)(?:\/([A-Za-z0-9_-]+))?/i);
+  if (m) return { id: m[1], shareToken: m[2] || null };
   return null;
 }
 
@@ -823,8 +826,9 @@ function matchDdbSpellsToDataset(names) {
 // arbitrary origins (github.io etc.), so we try the direct call first and fall back
 // through public CORS proxies. Real HTTP errors (404/403/etc.) are surfaced
 // immediately — we only retry on network/CORS failures.
-async function fetchDdbCharacter(id) {
-  const target = "https://character-service.dndbeyond.com/character/v5/character/" + encodeURIComponent(id);
+async function fetchDdbCharacter(id, shareToken) {
+  let target = "https://character-service.dndbeyond.com/character/v5/character/" + encodeURIComponent(id);
+  if (shareToken) target += "?shareKey=" + encodeURIComponent(shareToken);
 
   const candidates = [
     { url: target, label: "direct" },
@@ -908,19 +912,23 @@ async function onImport() {
   const goBtn = document.getElementById("import-go");
   const input = document.getElementById("import-url");
 
-  const id = parseCharacterId(input.value);
-  if (!id) {
-    setImportStatus("Please paste a D&D Beyond character URL (like <code>https://www.dndbeyond.com/characters/165242129</code>) or its numeric ID.", "error");
+  const parsed = parseCharacterId(input.value);
+  if (!parsed) {
+    setImportStatus("Please paste the shareable D&D Beyond character URL (like <code>https://www.dndbeyond.com/characters/165242129/nF349d</code>).", "error");
+    return;
+  }
+  if (!parsed.shareToken) {
+    setImportStatus("That URL is missing the share code at the end. On D&D Beyond, click the <strong>Share</strong> button on the character page and paste the full URL it gives you (it should end in a short code like <code>/nF349d</code>).", "error");
     return;
   }
 
   goBtn.disabled = true;
   const originalLabel = goBtn.textContent;
   goBtn.textContent = "Importing...";
-  setImportStatus("Fetching character " + id + " from D&D Beyond...", "info");
+  setImportStatus("Fetching character " + parsed.id + " from D&D Beyond...", "info");
 
   try {
-    const data = await fetchDdbCharacter(id);
+    const data = await fetchDdbCharacter(parsed.id, parsed.shareToken);
     const ddbNames = extractCantripsAndFirstLevelFromDdb(data);
     if (ddbNames.length === 0) {
       setImportStatus(
