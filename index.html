@@ -819,51 +819,85 @@ function matchDdbSpellsToDataset(names) {
   return { matched, missing };
 }
 
+// D&D Beyond's character-service endpoint doesn't allow cross-origin requests from
+// arbitrary origins (github.io etc.), so we try the direct call first and fall back
+// through public CORS proxies. Real HTTP errors (404/403/etc.) are surfaced
+// immediately — we only retry on network/CORS failures.
 async function fetchDdbCharacter(id) {
-  const url = "https://character-service.dndbeyond.com/character/v5/character/" + encodeURIComponent(id);
-  let res;
-  try {
-    res = await fetch(url, { method: "GET", mode: "cors", credentials: "omit" });
-  } catch (e) {
-    // Likely CORS or network failure
-    const msg = e && e.message ? e.message : String(e);
-    throw new ImportError(
-      "Couldn't reach D&D Beyond. This is usually a network issue or your browser blocking the request " +
-      "(CORS). If you're opening this file directly from disk, try moving it to a local web server " +
-      "(e.g. <code>python -m http.server</code>) and opening it via <code>http://localhost:8000</code>.",
-      "network"
-    );
+  const target = "https://character-service.dndbeyond.com/character/v5/character/" + encodeURIComponent(id);
+
+  const candidates = [
+    { url: target, label: "direct" },
+    { url: "https://corsproxy.io/?url=" + encodeURIComponent(target),       label: "corsproxy.io" },
+    { url: "https://api.allorigins.win/raw?url=" + encodeURIComponent(target), label: "allorigins.win" },
+    { url: "https://api.codetabs.com/v1/proxy?quest=" + encodeURIComponent(target), label: "codetabs.com" },
+  ];
+
+  for (let i = 0; i < candidates.length; i++) {
+    const c = candidates[i];
+    let res;
+    try {
+      res = await fetch(c.url, { method: "GET", mode: "cors", credentials: "omit" });
+    } catch (e) {
+      // Network / CORS failure — try the next candidate (if any)
+      if (i < candidates.length - 1) {
+        if (i === 0) {
+          setImportStatus("D&D Beyond blocked the direct request — retrying through a CORS proxy...", "info");
+        }
+        continue;
+      }
+      throw new ImportError(
+        "Couldn't reach D&D Beyond, even via fallback proxies. The proxies may be down or rate-limiting. " +
+        "Try again in a moment, or open this page from <code>http://localhost</code> instead of " +
+        "<code>file://</code> if that applies.",
+        "network"
+      );
+    }
+
+    // Real HTTP responses: surface meaningful errors immediately (don't try other proxies).
+    if (res.status === 404) {
+      throw new ImportError("Character not found. Double-check the URL or ID.", "notfound");
+    }
+    if (res.status === 403 || res.status === 401) {
+      throw new ImportError(
+        "Access denied. Make sure the character's privacy is set to <strong>Public</strong> on D&D Beyond " +
+        "(gear icon &rarr; Privacy on the character page).",
+        "private"
+      );
+    }
+    if (res.status === 429) {
+      // Proxy rate-limited — try the next one
+      if (i < candidates.length - 1) continue;
+      throw new ImportError("All CORS proxies are rate-limiting right now. Try again in a minute.", "ratelimit");
+    }
+    if (!res.ok) {
+      throw new ImportError("D&D Beyond returned status " + res.status + ".", "http");
+    }
+
+    let json;
+    try { json = await res.json(); }
+    catch (e) {
+      // Some proxies wrap the body or fail to forward content-type. Try the next.
+      if (i < candidates.length - 1) continue;
+      throw new ImportError("D&D Beyond returned an unexpected response.", "parse");
+    }
+    if (json && json.success === false) {
+      throw new ImportError(
+        "D&D Beyond refused the request. The character is likely set to Private — flip the privacy toggle " +
+        "to <strong>Public</strong> and try again.",
+        "private"
+      );
+    }
+    if (!json || !json.data) {
+      // Could be a proxy that wrapped the response. Try next.
+      if (i < candidates.length - 1) continue;
+      throw new ImportError("D&D Beyond returned an unexpected response.", "parse");
+    }
+    return json.data;
   }
-  if (res.status === 404) {
-    throw new ImportError("Character not found. Double-check the URL or ID.", "notfound");
-  }
-  if (res.status === 403 || res.status === 401) {
-    throw new ImportError(
-      "Access denied. Make sure the character's privacy is set to <strong>Public</strong> on D&D Beyond " +
-      "(gear icon &rarr; Privacy on the character page).",
-      "private"
-    );
-  }
-  if (!res.ok) {
-    throw new ImportError("D&D Beyond returned status " + res.status + ".", "http");
-  }
-  let json;
-  try { json = await res.json(); }
-  catch (e) {
-    throw new ImportError("D&D Beyond returned an unexpected response.", "parse");
-  }
-  if (json && json.success === false) {
-    // Service signals private/missing characters with success:false
-    throw new ImportError(
-      "D&D Beyond refused the request. The character is likely set to Private — flip the privacy toggle " +
-      "to <strong>Public</strong> and try again.",
-      "private"
-    );
-  }
-  if (!json || !json.data) {
-    throw new ImportError("D&D Beyond returned an unexpected response.", "parse");
-  }
-  return json.data;
+
+  // Unreachable — the loop either returns or throws.
+  throw new ImportError("Couldn't reach D&D Beyond.", "network");
 }
 
 class ImportError extends Error {
